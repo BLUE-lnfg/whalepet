@@ -1,0 +1,29 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.idea/
+.vscode/
+
+# PyInstaller 产物
+build/
+dist/
+*.spec.bak
+
+# 安装包产物
+installer_output/
+
+# 生成的帧缓存（可由 tools/import_assets.py 重建）
+profiles/default/.cache/
+
+# 用户数据
+*.log
+
+# 系统垃圾
+Thumbs.db
+.DS_Store
+
+# 临时备份
+*.zip
