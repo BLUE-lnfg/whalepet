@@ -1,11 +1,8 @@
 import json
 from pathlib import Path
-
 from PySide6.QtCore import QObject, Signal
 
-# 配置结构版本号。改了 config 结构（删/改名/改语义）就 +1，并在 _migrate 里加迁移逻辑
 CURRENT_SCHEMA = 1
-
 
 class ConfigManager(QObject):
     changed = Signal(str)
@@ -13,7 +10,7 @@ class ConfigManager(QObject):
     def __init__(self, path: Path):
         super().__init__()
         self._path = path
-        self._data: dict = {}
+        self._data = {}
         self.load()
 
     def load(self):
@@ -23,37 +20,25 @@ class ConfigManager(QObject):
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
             self._data = data if isinstance(data, dict) else {}
-        except Exception as e:
-            print(f"[config] 读取失败：{e}，使用空配置")
+        except Exception:
             self._data = {}
         self._migrate()
 
     def _migrate(self):
-        """把旧版本配置升级到 CURRENT_SCHEMA。每次结构变化只加一步，历史迁移永远保留。"""
         old = int(self._data.get("schema", 0))
         if old == CURRENT_SCHEMA:
             return
-
         if old < 1:
-            # 从 v0（无 schema 字段）升级到 v1：
-            # 1) 删掉废弃的 chatter.* 段（被 voice.* 取代）
             self._data.pop("chatter", None)
-            # 2) 其它历史遗留清理，按需加
-            pass
-
         self._data["schema"] = CURRENT_SCHEMA
         self.save()
-        print(f"[config] 已从 schema {old} 迁移到 {CURRENT_SCHEMA}")
 
     def save(self):
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                json.dumps(self._data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            print(f"[config] 保存失败：{e}")
+            self._path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     def get(self, key: str, default=None):
         node = self._data
@@ -70,6 +55,9 @@ class ConfigManager(QObject):
             if not isinstance(node.get(part), dict):
                 node[part] = {}
             node = node[part]
+        old = node.get(parts[-1])
         node[parts[-1]] = value
         self.save()
-        self.changed.emit(key)
+        if old != value:
+            print(f"[config] {key} = {value!r}（原值 {old!r}）")
+            self.changed.emit(key)

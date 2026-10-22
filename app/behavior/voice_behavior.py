@@ -1,266 +1,127 @@
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-
 from PySide6.QtCore import QObject, QTimer
-
 from app.animation.controller import PetController
+from app.config.binder import ConfigBinder
 from app.config.manager import ConfigManager
-from app.constants import PROFILES_DIR
 from app.services.audio import VoicePlayer
+from app.services.profile_manager import ProfileManager
 from app.ui.pet_window import PetWindow
 
-VOICE_ROOT = PROFILES_DIR / "default" / "assets" / "voice"
 BEIJING_TZ = timezone(timedelta(hours=8))
-
-CATEGORY_SUBDIR = {
-    "idle": "",
-    "click": "click",
-    "no_interaction": "special/no_interaction",
-    "late_night": "special/late_night",
-}
 
 
 class VoiceBehavior(QObject):
-    def __init__(self, pet: PetWindow, controller: PetController,
-                 config: ConfigManager, voice: VoicePlayer):
+    def __init__(self, pet: PetWindow, ctrl: PetController, config: ConfigManager, voice: VoicePlayer,
+                 pm: ProfileManager):
         super().__init__()
-        self._pet = pet
-        self._controller = controller
-        self._config = config
-        self._voice = voice
-
-        self._idle_timer = QTimer(self)
-        self._idle_timer.setSingleShot(True)
-        self._idle_timer.timeout.connect(self._try_play_idle)
-
-        self._no_interaction_timer = QTimer(self)
-        self._no_interaction_timer.setSingleShot(True)
-        self._no_interaction_timer.timeout.connect(self._try_play_no_interaction)
-        self._no_interaction_fired = False
-
-        self._clock_timer = QTimer(self)
-        self._clock_timer.setInterval(60_000)
-        self._clock_timer.timeout.connect(self._check_late_night)
-        self._last_late_night_date = str(
-            self._config.get("voice.last_late_night_date", "") or ""
-        ) or None
-
-        self._last_played: dict[str, Path] = {}
+        self._pet, self._ctrl, self._config, self._voice, self._pm = pet, ctrl, config, voice, pm
+        self._idle_timer = QTimer(self);
+        self._idle_timer.setSingleShot(True);
+        self._idle_timer.timeout.connect(self._play_idle)
+        self._no_inter_timer = QTimer(self);
+        self._no_inter_timer.setSingleShot(True);
+        self._no_inter_timer.timeout.connect(self._play_no_inter)
+        self._clock_timer = QTimer(self);
+        self._clock_timer.setInterval(60000);
+        self._clock_timer.timeout.connect(self._check_late)
+        self._last_date = str(self._config.get("voice.last_late_night_date", "") or "") or None
 
         self._pet.clicked.connect(self._on_clicked)
-        self._pet.drag_started.connect(self._on_user_interaction)
-        print("[voice] VoiceBehavior 初始化完成，clicked 信号已连接")
+        self._pet.drag_started.connect(self._on_user_interact)
+
+        # 订阅角色切换，清理旧状态并重新开始
+        self._pm.profile_changed.connect(self._on_profile_switched)
+
+        self._binder = ConfigBinder(config, self)
+        self._binder.bind(["voice.enabled", "voice.idle_min_interval_s", "voice.idle_max_interval_s"],
+                          self._on_idle_cfg)
+        self._binder.bind("voice.no_interaction_timeout_s", self._on_no_inter_cfg)
+        self._binder.bind(["voice.late_night_enabled", "voice.late_night_time"], self._on_late_cfg)
+
+    def _voice_root(self) -> Path:
+        return self._pm.current_voice_dir()
+
+    def _on_profile_switched(self, name):
+        print(f"[voice] 切换角色为 {name}，重置语音调度")
+        self._voice.stop_all()
+        self._schedule_idle()
+        self._reset_no_inter()
+
+    def _on_idle_cfg(self, key):
+        if self._config.get("voice.enabled", True):
+            self._schedule_idle()
+        else:
+            self._idle_timer.stop()
+
+    def _on_no_inter_cfg(self, key):
+        self._reset_no_inter()
+
+    def _on_late_cfg(self, key):
+        self._check_late()
 
     def start(self):
         self._schedule_idle()
-        self._reset_no_interaction_timer()
+        self._reset_no_inter()
         self._clock_timer.start()
-        self._check_late_night()
-        print(f"[voice] 启动完成，语言={self._lang()}，语音开关={self._enabled()}")
-
-    # ---------- 配置 ----------
-
-    def _cfg(self, key, default):
-        return self._config.get(f"voice.{key}", default)
-
-    def _enabled(self) -> bool:
-        return bool(self._cfg("enabled", True))
-
-    def _lang(self) -> str:
-        return str(self._cfg("language", "zh-CN"))
-
-    # ---------- 挑选（不连续重复）----------
-
-    def _pick_no_repeat(self, files: list[Path], category: str) -> Path | None:
-        if not files:
-            return None
-        if len(files) == 1:
-            chosen = files[0]
-        else:
-            last = self._last_played.get(category)
-            pool = [f for f in files if f != last] if last is not None else files
-            if not pool:
-                pool = files
-            chosen = random.choice(pool)
-        self._last_played[category] = chosen
-        return chosen
-
-    # ---------- 统一触发入口 ----------
-
-    def _trigger_category(self, category: str, *, play: bool = True,
-                          interrupt: bool = False) -> dict:
-        """
-        返回：{"ok": bool, "reason": str, "file": Path|None, "source": str}
-        play=True 时直接调用播放器。
-        """
-        if category not in CATEGORY_SUBDIR:
-            return {"ok": False, "reason": f"未知类别：{category}",
-                    "file": None, "source": ""}
-
-        if not self._enabled():
-            return {"ok": False, "reason": "语音总开关关闭",
-                    "file": None, "source": ""}
-
-        lang_dir = VOICE_ROOT / self._lang()
-
-        if category == "click":
-            click_files = self._list_files(lang_dir, "click")
-            if click_files:
-                files = click_files
-                record_key = "click"
-                source = "专用"
-            else:
-                files = self._list_files(lang_dir, "")
-                record_key = "click_fallback"
-                source = "回退闲置池"
-        else:
-            subdir = CATEGORY_SUBDIR[category]
-            files = self._list_files(lang_dir, subdir)
-            record_key = category
-            source = "专用"
-
-        if not files:
-            subdir = CATEGORY_SUBDIR.get(category, "")
-            target_dir = lang_dir / subdir if subdir else lang_dir
-            return {"ok": False, "reason": f"{target_dir} 下没有 wav",
-                    "file": None, "source": ""}
-
-        target = self._pick_no_repeat(files, category=record_key)
-        if target is None:
-            return {"ok": False, "reason": "无可用文件",
-                    "file": None, "source": ""}
-
-        if play:
-            self._voice.play(target, interrupt=interrupt)
-            print(f"[voice] 播放 {category}（{source}）：{target.name}")
-
-        return {"ok": True, "reason": "", "file": target, "source": source}
-
-    # ---------- 定时器回调 ----------
-
-    def _try_play_idle(self):
-        self._schedule_idle()
-        if not self._is_idle():
-            return
-        self._trigger_category("idle")
-
-    def _is_idle(self) -> bool:
-        if self._pet.is_dragging:
-            return False
-        if self._controller.current_action != "idle":
-            return False
-        return True
-
-    def _on_clicked(self):
-        print("[voice] 收到点击信号")
-        self._on_user_interaction()
-        if not bool(self._cfg("click_enabled", True)):
-            print("[voice] 点击跳过：click_enabled = false")
-            return
-        self._trigger_category("click", interrupt=True)
-
-    def _on_user_interaction(self):
-        self._no_interaction_fired = False
-        self._reset_no_interaction_timer()
-
-    def _reset_no_interaction_timer(self):
-        timeout_s = float(self._cfg("no_interaction_timeout_s", 900))
-        if timeout_s <= 0:
-            return
-        self._no_interaction_timer.start(int(timeout_s * 1000))
-
-    def _try_play_no_interaction(self):
-        if self._no_interaction_fired:
-            return
-        if self._pet.is_dragging:
-            return
-        files = self._list_files(
-            VOICE_ROOT / self._lang(), "special/no_interaction"
-        )
-        if not files:
-            return
-        result = self._trigger_category("no_interaction")
-        if result["ok"]:
-            self._no_interaction_fired = True
-
-    def _check_late_night(self):
-        if not bool(self._cfg("late_night_enabled", True)):
-            return
-        now = datetime.now(BEIJING_TZ)
-        today = now.strftime("%Y-%m-%d")
-        if self._last_late_night_date == today:
-            return
-        threshold = self._parse_hhmm(str(self._cfg("late_night_time", "22:30")))
-        if threshold is None:
-            return
-        if (now.hour, now.minute) < threshold:
-            return
-        files = self._list_files(
-            VOICE_ROOT / self._lang(), "special/late_night"
-        )
-        if not files:
-            return
-        result = self._trigger_category("late_night")
-        if result["ok"]:
-            self._last_late_night_date = today
-            self._config.set("voice.last_late_night_date", today)
+        self._check_late()
 
     def _schedule_idle(self):
-        lo = float(self._cfg("idle_min_interval_s", 300))
-        hi = float(self._cfg("idle_max_interval_s", 3600))
-        if hi < lo:
-            hi = lo
-        self._idle_timer.start(int(random.uniform(lo, hi) * 1000))
+        lo, hi = float(self._config.get("voice.idle_min_interval_s", 300)), float(
+            self._config.get("voice.idle_max_interval_s", 3600))
+        self._idle_timer.start(int(random.uniform(lo, max(lo, hi)) * 1000))
 
-    # ---------- 工具 ----------
+    def _reset_no_inter(self):
+        timeout = float(self._config.get("voice.no_interaction_timeout_s", 900))
+        self._no_inter_timer.start(int(timeout * 1000))
 
-    @staticmethod
-    def _parse_hhmm(s: str):
+    def _on_user_interact(self):
+        self._reset_no_inter()
+
+    def _on_clicked(self):
+        self._on_user_interact()
+        if not self._config.get("voice.click_enabled", True): return
+        lang = str(self._config.get("voice.language", "zh-CN"))
+        click_dir = self._voice_root() / lang / "click"
+        files = list(click_dir.glob("*.wav")) if click_dir.exists() else list((self._voice_root() / lang).glob("*.wav"))
+        if files: self._voice.play(random.choice(files), interrupt=True)
+
+    def _play_idle(self):
+        self._schedule_idle()
+        if not self._config.get("voice.enabled",
+                                True) or self._pet.is_dragging or self._ctrl.current_action != "idle": return
+        lang = str(self._config.get("voice.language", "zh-CN"))
+        files = list((self._voice_root() / lang).glob("*.wav"))
+        if files: self._voice.play(random.choice(files))
+
+    def _play_no_inter(self):
+        if self._pet.is_dragging: return
+        lang = str(self._config.get("voice.language", "zh-CN"))
+        files = list((self._voice_root() / lang / "special" / "no_interaction").glob("*.wav"))
+        if files: self._voice.play(random.choice(files))
+
+    def _check_late(self):
+        if not self._config.get("voice.enabled", True) or not self._config.get("voice.late_night_enabled", True): return
+        now = datetime.now(BEIJING_TZ)
+        today = now.strftime("%Y-%m-%d")
+        if self._last_date == today: return
+        t_str = str(self._config.get("voice.late_night_time", "22:30"))
         try:
-            h, m = s.strip().split(":")
-            h, m = int(h), int(m)
-            if 0 <= h < 24 and 0 <= m < 60:
-                return h, m
+            h, m = map(int, t_str.split(":"))
+            if (now.hour, now.minute) < (h, m): return
         except Exception:
-            pass
-        return None
+            return
+        lang = str(self._config.get("voice.language", "zh-CN"))
+        files = list((self._voice_root() / lang / "special" / "late_night").glob("*.wav"))
+        if files:
+            self._last_date = today
+            self._config.set("voice.last_late_night_date", today)
+            self._voice.play(random.choice(files))
 
-    def _list_files(self, base: Path, subdir: str) -> list[Path]:
-        folder = base / subdir if subdir else base
-        if not folder.is_dir():
-            return []
-        return sorted(
-            p for p in folder.iterdir()
-            if p.is_file() and p.suffix.lower() == ".wav"
-        )
-
-    # ---------- 调试接口（供测试工具 & M4 设置面板使用）----------
-
-    def debug_trigger(self, category: str) -> dict:
-        """手动触发指定类别，不改变熬夜/无交互的状态标记。"""
-        return self._trigger_category(category, play=True)
-
-    def debug_info(self) -> dict:
-        """返回当前配置和各类别素材数量。"""
-        lang = self._lang()
-        lang_dir = VOICE_ROOT / lang
-        counts = {
-            "idle": len(self._list_files(lang_dir, "")),
-            "click": len(self._list_files(lang_dir, "click")),
-            "no_interaction": len(self._list_files(lang_dir, "special/no_interaction")),
-            "late_night": len(self._list_files(lang_dir, "special/late_night")),
-        }
-        return {
-            "enabled": self._enabled(),
-            "language": lang,
-            "click_enabled": bool(self._cfg("click_enabled", True)),
-            "late_night_enabled": bool(self._cfg("late_night_enabled", True)),
-            "late_night_time": str(self._cfg("late_night_time", "22:30")),
-            "idle_interval": (
-                self._cfg("idle_min_interval_s", 300),
-                self._cfg("idle_max_interval_s", 3600),
-            ),
-            "no_interaction_timeout_s": self._cfg("no_interaction_timeout_s", 900),
-            "counts": counts,
-        }
+    def debug_info(self):
+        return {"enabled": self._config.get("voice.enabled", True),
+                "language": self._config.get("voice.language", "zh-CN"), "click_enabled": True,
+                "late_night_enabled": True, "late_night_time": "22:30", "idle_interval": (300, 3600),
+                "no_interaction_timeout_s": 900,
+                "counts": {"idle": 0, "click": 0, "no_interaction": 0, "late_night": 0}}

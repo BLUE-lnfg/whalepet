@@ -1,148 +1,143 @@
 import random
-
-from PySide6.QtCore import QEasingCurve, QObject, QTimer, QVariantAnimation
-
+from PySide6.QtCore import QObject, QTimer, QVariantAnimation, QEasingCurve
 from app.animation.controller import PetController
+from app.config.binder import ConfigBinder
 from app.config.manager import ConfigManager
 from app.ui.pet_window import PetWindow
 
 
 class WanderManager(QObject):
-    """自动散步 + 随机朝向。所有触发参数都从 config 读，用户可改 config.json 调。"""
-
     WALK_ACTION = "walk"
 
     def __init__(self, pet: PetWindow, controller: PetController, config: ConfigManager):
         super().__init__()
-        self._pet = pet
-        self._controller = controller
-        self._config = config
+        self._pet, self._controller, self._config = pet, controller, config
 
-        self._wander_timer = QTimer(self)
-        self._wander_timer.setSingleShot(True)
-        self._wander_timer.timeout.connect(self._try_start_walk)
+        self._walk_timer = QTimer(self);
+        self._walk_timer.setSingleShot(True);
+        self._walk_timer.timeout.connect(self._try_walk)
+        self._face_timer = QTimer(self);
+        self._face_timer.setSingleShot(True);
+        self._face_timer.timeout.connect(self._try_face)
 
-        self._facing_timer = QTimer(self)
-        self._facing_timer.setSingleShot(True)
-        self._facing_timer.timeout.connect(self._maybe_turn_facing)
+        # 新增：备用待机动画的定时器
+        self._idle_alt_timer = QTimer(self);
+        self._idle_alt_timer.setSingleShot(True);
+        self._idle_alt_timer.timeout.connect(self._try_play_alt_idle)
 
-        self._move_anim = QVariantAnimation(self)
+        self._move_anim = QVariantAnimation(self);
         self._move_anim.setEasingCurve(QEasingCurve.Linear)
         self._move_anim.valueChanged.connect(self._on_move)
         self._move_anim.finished.connect(self._on_walk_done)
-
         self._walking = False
 
-        self._pet.drag_started.connect(self._abort_walk_by_drag)
-        self._controller.clip_changed.connect(self._on_clip_changed)
+        self._binder = ConfigBinder(config, self)
+        self._binder.bind(["behavior.walk.enabled", "behavior.walk.min_interval_s", "behavior.walk.max_interval_s"],
+                          self._on_walk_cfg)
+        self._binder.bind(["behavior.facing.turn_min_s", "behavior.facing.turn_max_s"], self._on_face_cfg)
 
-    # ---------- 配置读取 ----------
+    def _on_walk_cfg(self, key):
+        if not self._config.get("behavior.walk.enabled", True):
+            self._walk_timer.stop()
+            if self._walking: self._abort_walk("开关关闭")
+            return
+        self._schedule_walk()
 
-    def _cfg(self, key, default):
-        return self._config.get(f"behavior.{key}", default)
-
-    # ---------- 启动 ----------
+    def _on_face_cfg(self, key):
+        self._schedule_face()
 
     def start(self):
-        self._schedule_wander()
-        self._schedule_facing()
+        self._schedule_walk()
+        self._schedule_face()
+        self._schedule_alt_idle()
 
-    # ---------- 散步 ----------
+    # ========== 散步逻辑 ==========
+    def _schedule_walk(self):
+        if not self._config.get("behavior.walk.enabled", True): return
+        lo = float(self._config.get("behavior.walk.min_interval_s", 25))
+        hi = float(self._config.get("behavior.walk.max_interval_s", 70))
+        self._walk_timer.start(int(random.uniform(lo, max(lo, hi)) * 1000))
 
-    def _schedule_wander(self):
-        if not self._cfg("walk.enabled", True):
+    def _try_walk(self):
+        if not self._config.get("behavior.walk.enabled",
+                                True) or self._walking or self._controller.current_action != "idle" or not self._controller.has(
+                self.WALK_ACTION):
+            self._schedule_walk()
             return
-        lo = float(self._cfg("walk.min_interval_s", 25))
-        hi = float(self._cfg("walk.max_interval_s", 70))
-        if hi < lo:
-            hi = lo
-        self._wander_timer.start(int(random.uniform(lo, hi) * 1000))
-
-    def _try_start_walk(self):
-        if self._walking or self._controller.current_action != "idle":
-            self._schedule_wander()
-            return
-        if not self._controller.has(self.WALK_ACTION):
-            # 没有 walk 素材，静默跳过，但不影响下次再试（用户以后补了素材就自动生效）
-            self._schedule_wander()
-            return
-
-        lo = int(self._cfg("walk.min_distance", 120))
-        hi = int(self._cfg("walk.max_distance", 380))
-        distance = random.randint(lo, max(lo, hi))
-        direction = random.choice((-1, 1))
-
         min_x, max_x = self._pet.walk_x_bounds()
         cur_x = self._pet.x()
-
-        # 一侧空间不够就反向；反向也不够就放弃本次
-        if direction == -1 and cur_x - distance < min_x:
+        dist = random.randint(int(self._config.get("behavior.walk.min_distance", 120)),
+                              int(self._config.get("behavior.walk.max_distance", 380)))
+        direction = random.choice((-1, 1))
+        if direction == -1 and cur_x - dist < min_x:
             direction = 1
-        elif direction == 1 and cur_x + distance > max_x:
+        elif direction == 1 and cur_x + dist > max_x:
             direction = -1
-
-        target_x = max(min_x, min(max_x, cur_x + direction * distance))
+        target_x = max(min_x, min(max_x, cur_x + direction * dist))
         if abs(target_x - cur_x) < 20:
-            self._schedule_wander()
+            self._schedule_walk()
             return
 
-        # 朝向与移动方向一致
         self._pet.set_facing("left" if direction == -1 else "right")
-
         self._walking = True
         self._controller.play(self.WALK_ACTION, loop=True)
-
-        speed = max(10, int(self._cfg("walk.speed_px_per_s", 50)))
-        duration_ms = int(abs(target_x - cur_x) / speed * 1000)
-        duration_ms = max(200, duration_ms)
-
+        speed = max(10, int(self._config.get("behavior.walk.speed_px_per_s", 80)))
+        dur = max(200, int(abs(target_x - cur_x) / speed * 1000))
         self._move_anim.stop()
-        self._move_anim.setDuration(duration_ms)
+        self._move_anim.setDuration(dur)
         self._move_anim.setStartValue(cur_x)
         self._move_anim.setEndValue(target_x)
         self._move_anim.start()
 
-    def _on_move(self, value):
-        if not self._walking:
-            return
-        self._pet.move(int(round(float(value))), self._pet.y())
+    def _on_move(self, val):
+        if self._walking: self._pet.move(int(val), self._pet.y())
 
     def _on_walk_done(self):
-        if not self._walking:
-            return
+        if not self._walking: return
         self._walking = False
         self._controller.play_idle()
-        self._schedule_wander()
+        self._schedule_walk()
 
-    def _abort_walk_by_drag(self):
-        if not self._walking:
-            return
+    def _abort_walk(self, reason):
         self._move_anim.stop()
         self._walking = False
         self._controller.play_idle()
-        self._schedule_wander()
+        self._schedule_walk()
 
-    def _on_clip_changed(self, clip):
-        # 散步期间若被外部切走（比如 click），立刻停止位移
-        if self._walking and clip.action != self.WALK_ACTION:
-            self._move_anim.stop()
-            self._walking = False
-            self._schedule_wander()
+    # ========== 随机朝向 ==========
+    def _schedule_face(self):
+        lo = float(self._config.get("behavior.facing.turn_min_s", 8))
+        hi = float(self._config.get("behavior.facing.turn_max_s", 20))
+        self._face_timer.start(int(random.uniform(lo, max(lo, hi)) * 1000))
 
-    # ---------- 随机朝向 ----------
-
-    def _schedule_facing(self):
-        lo = float(self._cfg("facing.turn_min_s", 8))
-        hi = float(self._cfg("facing.turn_max_s", 20))
-        if hi < lo:
-            hi = lo
-        self._facing_timer.start(int(random.uniform(lo, hi) * 1000))
-
-    def _maybe_turn_facing(self):
-        self._schedule_facing()
-        if self._walking:
-            return
-        if self._controller.current_action != "idle":
-            return
-        if random.random() < float(self._cfg("facing.turn_probability", 0.5)):
+    def _try_face(self):
+        self._schedule_face()
+        if self._walking or self._controller.current_action != "idle": return
+        if random.random() < float(self._config.get("behavior.facing.turn_probability", 0.5)):
             self._pet.toggle_facing()
+
+    # ========== 新增：备用待机动画轮换 ==========
+    def _schedule_alt_idle(self):
+        # 默认每 40~90 秒尝试一次切换备用待机
+        self._idle_alt_timer.start(random.randint(40, 90) * 1000)
+
+    def _try_play_alt_idle(self):
+        self._schedule_alt_idle()  # 先预约下一次
+
+        # 只有在主 idle 状态下才切（走路或点击时不行）
+        if self._controller.current_action != "idle" or self._walking:
+            return
+
+        # 寻找所有备用待机动作（名字是 idle_xxx，且不是主 idle）
+        all_actions = self._controller.available_actions()
+        alt_actions = [a for a in all_actions if a.startswith("idle_") and a != "idle"]
+
+        # 【核心需求】：如果没有备用动作，直接 return 跳过，什么都不做
+        if not alt_actions:
+            return
+
+        # 如果有，随机挑一个播放一次（loop=False）
+        target = random.choice(alt_actions)
+        print(f"[wander] 播放备用待机动作：{target}")
+        # 播完后，controller 的 _on_finished 会自动切回主 idle
+        self._controller.play(target, loop=False)
