@@ -3,6 +3,7 @@ from PySide6.QtGui import QAction, QCursor, QPainter
 from PySide6.QtWidgets import QApplication, QMenu, QToolTip, QWidget
 
 from app.animation.clip import Clip
+from app.config.binder import ConfigBinder
 from app.config.manager import ConfigManager
 
 CLICK_DISTANCE_THRESHOLD = 5
@@ -48,7 +49,28 @@ class PetWindow(QWidget):
 
         self._place_bottom()
 
-    # ========== controller 接线 ==========
+        self._binder = ConfigBinder(config, self)
+        self._binder.bind("pet.offset_y", self._on_offset_changed_external)
+
+    # ---------- 外部改 offset 的响应 ----------
+
+    def _on_offset_changed_external(self, key: str):
+        new_value = int(self._config.get("pet.offset_y", 0))
+        self._apply_offset(new_value)
+
+    def _apply_offset(self, value: int):
+        value = int(value)
+        if value == self._offset_y:
+            return
+        self._offset_y = value
+        screen = self.screen().availableGeometry()
+        y = screen.y() + screen.height() - self.height() + value
+        self.move(self.x(), y)
+
+    def set_offset(self, value: int):
+        self._config.set("pet.offset_y", int(value))
+
+    # ---------- controller 接线 ----------
 
     def set_controller(self, controller):
         self._controller = controller
@@ -66,13 +88,11 @@ class PetWindow(QWidget):
         self._current_frame_idx = idx
         self.update()
 
-    # ========== 拖动状态 ==========
-
     @property
     def is_dragging(self) -> bool:
         return self._drag_offset is not None and self._moved
 
-    # ========== 朝向 ==========
+    # ---------- 朝向 ----------
 
     @property
     def facing(self) -> str:
@@ -81,14 +101,16 @@ class PetWindow(QWidget):
     def set_facing(self, facing: str):
         if facing not in ("right", "left") or facing == self._facing:
             return
+        old = self._facing
         self._facing = facing
         self.update()
         self.facing_changed.emit(facing)
+        print(f"[pet] 朝向：{old} → {facing}")
 
     def toggle_facing(self):
         self.set_facing("left" if self._facing == "right" else "right")
 
-    # ========== 尺寸 & 位置 ==========
+    # ---------- 尺寸 & 位置 ----------
 
     def _apply_clip_size(self, clip: Clip):
         dpr = self.devicePixelRatioF()
@@ -125,12 +147,13 @@ class PetWindow(QWidget):
         screen = self.screen().availableGeometry()
         return screen.x(), screen.x() + screen.width() - self.width()
 
-    # ========== 纵向调整 ==========
+    # ---------- 纵向调整 ----------
 
     def toggle_arm_vertical_unlock(self):
         if self._vertical_unlock_armed:
             self._vertical_unlock_armed = False
             self.unsetCursor()
+            print("[pet] 纵向调整：已取消")
         else:
             self._vertical_unlock_armed = True
             self.setCursor(Qt.SizeVerCursor)
@@ -139,23 +162,23 @@ class PetWindow(QWidget):
                 "下次拖动可上下移动，松手后自动锁定",
                 self,
             )
+            print("[pet] 纵向调整：已激活，下次拖动生效")
 
     def _persist_offset_from_position(self):
         screen = self.screen().availableGeometry()
         base_y = screen.y() + screen.height() - self.height()
-        self._offset_y = self.y() - base_y
-        self._config.set("pet.offset_y", self._offset_y)
-        print(f"[pet] 纵向偏移已更新为 {self._offset_y}")
+        new_offset = self.y() - base_y
+        self.set_offset(new_offset)
+        print(f"[pet] 纵向偏移已更新为 {new_offset}")
 
     def reset_position(self):
-        self._offset_y = 0
-        self._config.set("pet.offset_y", 0)
         screen = self.screen().availableGeometry()
+        self.set_offset(0)
         x = screen.x() + screen.width() - self.width() - 60
-        y = screen.y() + screen.height() - self.height()
-        self.move(QPoint(x, y))
+        self.move(x, self.y())
+        print("[pet] 已复位到屏幕底部")
 
-    # ========== 绘制 ==========
+    # ---------- 绘制 ----------
 
     def paintEvent(self, event):
         if self._current_clip is None:
@@ -166,7 +189,7 @@ class PetWindow(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.drawPixmap(0, 0, pix)
 
-    # ========== 鼠标穿透 ==========
+    # ---------- 鼠标穿透 ----------
 
     def add_through_action(self, action: QAction):
         self._through_actions.append(action)
@@ -185,8 +208,9 @@ class PetWindow(QWidget):
             a.blockSignals(True)
             a.setChecked(enabled)
             a.blockSignals(False)
+        print(f"[pet] 鼠标穿透：{'开' if enabled else '关'}")
 
-    # ========== 拖动 & 点击 ==========
+    # ---------- 拖动 & 点击 ----------
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -221,12 +245,11 @@ class PetWindow(QWidget):
         self._press_pos = None
         event.accept()
 
-    # ========== 右键菜单 ==========
+    # ---------- 右键菜单 ----------
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
 
-        # --- 显示 ---
         act_through = menu.addAction("鼠标穿透")
         act_through.setCheckable(True)
         act_through.setChecked(self._mouse_through)
@@ -235,7 +258,6 @@ class PetWindow(QWidget):
 
         menu.addSeparator()
 
-        # --- 位置 ---
         label = "取消纵向调整" if self._vertical_unlock_armed else "调整纵向位置"
         act_adjust = menu.addAction(label)
         act_adjust.triggered.connect(self.toggle_arm_vertical_unlock)
@@ -245,7 +267,6 @@ class PetWindow(QWidget):
 
         menu.addSeparator()
 
-        # --- 语音 ---
         act_voice = menu.addAction("语音")
         act_voice.setCheckable(True)
         act_voice.setChecked(bool(self._config.get("voice.enabled", True)))
@@ -266,7 +287,6 @@ class PetWindow(QWidget):
 
         menu.addSeparator()
 
-        # --- 设置 & 退出 ---
         act_settings = menu.addAction("设置…")
         act_settings.triggered.connect(self.settings_requested.emit)
 

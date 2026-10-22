@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QTimer
 
 from app.animation.controller import PetController
+from app.config.binder import ConfigBinder
 from app.config.manager import ConfigManager
 from app.constants import PROFILES_DIR
 from app.services.audio import VoicePlayer
@@ -50,6 +51,23 @@ class VoiceBehavior(QObject):
 
         self._pet.clicked.connect(self._on_clicked)
         self._pet.drag_started.connect(self._on_user_interaction)
+
+        # 声明式绑定：本模块关心哪些配置项，一眼可见
+        self._binder = ConfigBinder(config, self)
+        self._binder.bind(
+            ["voice.idle_min_interval_s", "voice.idle_max_interval_s",
+             "voice.enabled"],
+            self._on_idle_related_changed,
+        )
+        self._binder.bind(
+            "voice.no_interaction_timeout_s",
+            self._on_no_interaction_timeout_changed,
+        )
+        self._binder.bind(
+            ["voice.late_night_enabled", "voice.late_night_time"],
+            self._on_late_night_config_changed,
+        )
+
         print("[voice] VoiceBehavior 初始化完成，clicked 信号已连接")
 
     def start(self):
@@ -58,6 +76,23 @@ class VoiceBehavior(QObject):
         self._clock_timer.start()
         self._check_late_night()
         print(f"[voice] 启动完成，语言={self._lang()}，语音开关={self._enabled()}")
+
+    # ---------- 配置变化响应 ----------
+
+    def _on_idle_related_changed(self, key: str):
+        print(f"[voice] {key} 变化，重新调度闲置计时器")
+        if self._enabled():
+            self._schedule_idle()
+        else:
+            self._idle_timer.stop()
+
+    def _on_no_interaction_timeout_changed(self, key: str):
+        print("[voice] 无交互阈值变化，重新调度")
+        self._reset_no_interaction_timer()
+
+    def _on_late_night_config_changed(self, key: str):
+        print("[voice] 熬夜配置变化，立即检查")
+        self._check_late_night()
 
     # ---------- 配置 ----------
 
@@ -90,10 +125,6 @@ class VoiceBehavior(QObject):
 
     def _trigger_category(self, category: str, *, play: bool = True,
                           interrupt: bool = False) -> dict:
-        """
-        返回：{"ok": bool, "reason": str, "file": Path|None, "source": str}
-        play=True 时直接调用播放器。
-        """
         if category not in CATEGORY_SUBDIR:
             return {"ok": False, "reason": f"未知类别：{category}",
                     "file": None, "source": ""}
@@ -235,14 +266,12 @@ class VoiceBehavior(QObject):
             if p.is_file() and p.suffix.lower() == ".wav"
         )
 
-    # ---------- 调试接口（供测试工具 & M4 设置面板使用）----------
+    # ---------- 调试接口 ----------
 
     def debug_trigger(self, category: str) -> dict:
-        """手动触发指定类别，不改变熬夜/无交互的状态标记。"""
         return self._trigger_category(category, play=True)
 
     def debug_info(self) -> dict:
-        """返回当前配置和各类别素材数量。"""
         lang = self._lang()
         lang_dir = VOICE_ROOT / lang
         counts = {

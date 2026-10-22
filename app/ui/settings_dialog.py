@@ -1,23 +1,21 @@
 import os
 
 from PySide6.QtCore import Qt, QPoint
+from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QStackedWidget, QScrollArea, QGroupBox, QFormLayout, QLabel,
     QCheckBox, QComboBox, QSpinBox, QDoubleSpinBox, QPushButton,
-    QLineEdit, QMessageBox,
+    QLineEdit, QMessageBox, QPlainTextEdit,
 )
 
 from app.config.manager import ConfigManager
 from app.behavior.voice_behavior import VoiceBehavior
 from app.ui.pet_window import PetWindow
 from app.services import autostart
+from app.services.logger import bus as log_bus
 from app.constants import USER_DIR, LOG_DIR
 
-
-# ============================================================
-# 通用小工具
-# ============================================================
 
 def _card(title: str) -> tuple[QGroupBox, QFormLayout]:
     box = QGroupBox(title)
@@ -52,7 +50,6 @@ class _Page(QScrollArea):
         self._layout.insertWidget(self._layout.count() - 1, w)
 
     def refresh_from_config(self):
-        """子类按需覆写。仅在值真的变化时才更新控件，并 blockSignals 避免循环。"""
         pass
 
 
@@ -334,19 +331,16 @@ class AppearancePage(_Page):
             self.spin_offset.blockSignals(False)
 
     def _on_offset_changed(self, value: int):
+        # 只写 config，位置由 PetWindow 订阅 pet.offset_y 自动应用
         self._config.set("pet.offset_y", int(value))
-        self._pet._offset_y = int(value)
-        screen = self._pet.screen().availableGeometry()
-        y = screen.y() + screen.height() - self._pet.height() + int(value)
-        self._pet.move(self._pet.x(), y)
 
     def _reset(self):
-        self.spin_offset.setValue(0)
         self._pet.reset_position()
+        # reset_position 内部会 set config，触发 changed，refresh_from_config 自动同步 spinbox
 
 
 # ============================================================
-# 系统页（开机自启 + 数据目录）
+# 系统页
 # ============================================================
 
 class SystemPage(_Page):
@@ -406,6 +400,78 @@ class SystemPage(_Page):
 
 
 # ============================================================
+# 日志页
+# ============================================================
+
+class LogPage(QWidget):
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        toolbar = QHBoxLayout()
+        self._count_label = QLabel("0 条")
+        self._count_label.setObjectName("Hint")
+
+        btn_clear = QPushButton("清空显示")
+        btn_clear.setObjectName("Secondary")
+        btn_clear.clicked.connect(self._clear)
+
+        btn_copy = QPushButton("复制全部")
+        btn_copy.setObjectName("Secondary")
+        btn_copy.clicked.connect(self._copy_all)
+
+        btn_open = QPushButton("打开日志目录")
+        btn_open.setObjectName("Secondary")
+        btn_open.clicked.connect(self._open_log_dir)
+
+        toolbar.addWidget(self._count_label)
+        toolbar.addStretch()
+        toolbar.addWidget(btn_clear)
+        toolbar.addWidget(btn_copy)
+        toolbar.addWidget(btn_open)
+        layout.addLayout(toolbar)
+
+        self._view = QPlainTextEdit()
+        self._view.setReadOnly(True)
+        font = QFont("Consolas")
+        font.setStyleHint(QFont.Monospace)
+        font.setPointSize(9)
+        self._view.setFont(font)
+        self._view.setMaximumBlockCount(2000)
+        self._view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        layout.addWidget(self._view, 1)
+
+        for line in log_bus().history():
+            self._view.appendPlainText(line)
+        self._update_count()
+
+        log_bus().log_emitted.connect(self._on_log)
+
+    def _on_log(self, line: str):
+        self._view.appendPlainText(line)
+        sb = self._view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+        self._update_count()
+
+    def _clear(self):
+        self._view.clear()
+        self._update_count()
+
+    def _update_count(self):
+        n = self._view.blockCount()
+        self._count_label.setText(f"{n} 条（内存上限 2000）")
+
+    def _copy_all(self):
+        QGuiApplication.clipboard().setText(self._view.toPlainText())
+
+    def _open_log_dir(self):
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(LOG_DIR))
+
+
+# ============================================================
 # 设置面板主窗口
 # ============================================================
 
@@ -415,7 +481,7 @@ class SettingsDialog(QWidget):
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setWindowTitle("桌宠设置")
-        self.resize(760, 560)
+        self.resize(820, 600)
 
         self._config = config
         self._drag_pos: QPoint | None = None
@@ -431,7 +497,6 @@ class SettingsDialog(QWidget):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        # ---- 标题栏 ----
         title_bar = QWidget()
         title_bar.setObjectName("TitleBar")
         title_bar.setFixedHeight(44)
@@ -450,7 +515,6 @@ class SettingsDialog(QWidget):
         tb.addWidget(btn_close)
         root_layout.addWidget(title_bar)
 
-        # ---- 主体 ----
         body = QWidget()
         body_layout = QHBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
@@ -458,7 +522,7 @@ class SettingsDialog(QWidget):
 
         self._nav = QListWidget()
         self._nav.setFixedWidth(170)
-        for text in ("语音", "行为", "外观", "系统"):
+        for text in ("语音", "行为", "外观", "系统", "日志"):
             self._nav.addItem(QListWidgetItem(text))
         self._nav.currentRowChanged.connect(self._on_nav_changed)
         body_layout.addWidget(self._nav)
@@ -469,22 +533,22 @@ class SettingsDialog(QWidget):
         self._behavior_page = BehaviorPage(config)
         self._appearance_page = AppearancePage(config, pet)
         self._system_page = SystemPage(config)
+        self._log_page = LogPage()
 
         self._stack.addWidget(self._voice_page)
         self._stack.addWidget(self._behavior_page)
         self._stack.addWidget(self._appearance_page)
         self._stack.addWidget(self._system_page)
+        self._stack.addWidget(self._log_page)
 
         body_layout.addWidget(self._stack, 1)
 
         root_layout.addWidget(body, 1)
         self._nav.setCurrentRow(0)
 
-        # ---- 订阅 config 变化，实现与右键菜单等外部修改的实时同步 ----
         self._config.changed.connect(self._on_config_changed)
 
     def _on_config_changed(self, key: str):
-        # 只把变化派发到相关页面，避免无谓刷新
         if key.startswith("voice."):
             self._voice_page.refresh_from_config()
         elif key == "pet.offset_y":
@@ -495,7 +559,6 @@ class SettingsDialog(QWidget):
             self._stack.setCurrentIndex(row)
 
     def show_and_raise(self):
-        # 显示前全量同步一次，兜底覆盖"面板关着时 config 被外部修改"的场景
         self._voice_page.refresh_from_config()
         self._behavior_page.refresh_from_config()
         self._appearance_page.refresh_from_config()
@@ -505,7 +568,6 @@ class SettingsDialog(QWidget):
         self.raise_()
         self.activateWindow()
 
-    # 无边框窗口拖动
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and event.position().y() < 44:
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()

@@ -2,6 +2,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from app.constants import APP_NAME, CONFIG_FILE, PROFILES_DIR, ensure_user_dirs
+from app.services.logger import install_logger, shutdown_logger
 from app.config.manager import ConfigManager
 from app.ui.pet_window import PetWindow
 from app.services.tray import PetTray
@@ -17,7 +18,12 @@ from app.ui.settings_dialog import SettingsDialog
 def main():
     ensure_user_dirs()
 
-    # 开机自启路径自愈：绿色版被移动后自动修正注册表
+    # 尽早安装日志系统，后续所有 print 都会写入文件 + 日志窗口
+    log_path = install_logger()
+    if log_path is not None:
+        print(f"[main] 日志文件：{log_path}")
+
+    # 开机自启路径自愈
     if autostart.sync_if_needed():
         print("[autostart] 注册表路径已过期，已自动更新为新路径")
 
@@ -54,7 +60,9 @@ def main():
     tray.settings_requested.connect(settings.show_and_raise)
     tray.show()
 
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    shutdown_logger()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

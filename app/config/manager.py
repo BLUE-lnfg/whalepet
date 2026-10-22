@@ -3,7 +3,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-# 配置结构版本号。改了 config 结构（删/改名/改语义）就 +1，并在 _migrate 里加迁移逻辑
 CURRENT_SCHEMA = 1
 
 
@@ -29,18 +28,11 @@ class ConfigManager(QObject):
         self._migrate()
 
     def _migrate(self):
-        """把旧版本配置升级到 CURRENT_SCHEMA。每次结构变化只加一步，历史迁移永远保留。"""
         old = int(self._data.get("schema", 0))
         if old == CURRENT_SCHEMA:
             return
-
         if old < 1:
-            # 从 v0（无 schema 字段）升级到 v1：
-            # 1) 删掉废弃的 chatter.* 段（被 voice.* 取代）
             self._data.pop("chatter", None)
-            # 2) 其它历史遗留清理，按需加
-            pass
-
         self._data["schema"] = CURRENT_SCHEMA
         self.save()
         print(f"[config] 已从 schema {old} 迁移到 {CURRENT_SCHEMA}")
@@ -70,6 +62,13 @@ class ConfigManager(QObject):
             if not isinstance(node.get(part), dict):
                 node[part] = {}
             node = node[part]
+
+        old = node.get(parts[-1])
         node[parts[-1]] = value
         self.save()
+
+        if old == value:
+            return
+
+        print(f"[config] {key} = {value!r}（原值 {old!r}）")
         self.changed.emit(key)
