@@ -19,8 +19,6 @@ class WanderManager(QObject):
         self._face_timer = QTimer(self);
         self._face_timer.setSingleShot(True);
         self._face_timer.timeout.connect(self._try_face)
-
-        # 新增：备用待机动画的定时器
         self._idle_alt_timer = QTimer(self);
         self._idle_alt_timer.setSingleShot(True);
         self._idle_alt_timer.timeout.connect(self._try_play_alt_idle)
@@ -34,24 +32,29 @@ class WanderManager(QObject):
         self._binder = ConfigBinder(config, self)
         self._binder.bind(["behavior.walk.enabled", "behavior.walk.min_interval_s", "behavior.walk.max_interval_s"],
                           self._on_walk_cfg)
-        self._binder.bind(["behavior.facing.turn_min_s", "behavior.facing.turn_max_s"], self._on_face_cfg)
+        self._binder.bind(
+            ["behavior.facing.turn_min_s", "behavior.facing.turn_max_s", "behavior.facing.turn_probability"],
+            self._on_face_cfg)
 
     def _on_walk_cfg(self, key):
         if not self._config.get("behavior.walk.enabled", True):
             self._walk_timer.stop()
             if self._walking: self._abort_walk("开关关闭")
             return
+        print(f"[wander] {key} 变化，重新调度散步")
         self._schedule_walk()
 
     def _on_face_cfg(self, key):
+        print(f"[wander] {key} 变化，重新调度翻面")
         self._schedule_face()
 
     def start(self):
+        print(
+            f"[wander] 启动：散步间隔 {self._config.get('behavior.walk.min_interval_s', 25)}-{self._config.get('behavior.walk.max_interval_s', 70)}s")
         self._schedule_walk()
         self._schedule_face()
         self._schedule_alt_idle()
 
-    # ========== 散步逻辑 ==========
     def _schedule_walk(self):
         if not self._config.get("behavior.walk.enabled", True): return
         lo = float(self._config.get("behavior.walk.min_interval_s", 25))
@@ -83,6 +86,7 @@ class WanderManager(QObject):
         self._controller.play(self.WALK_ACTION, loop=True)
         speed = max(10, int(self._config.get("behavior.walk.speed_px_per_s", 80)))
         dur = max(200, int(abs(target_x - cur_x) / speed * 1000))
+        print(f"[wander] 开始散步：方向={'左' if direction == -1 else '右'}，速度 {speed}px/s")
         self._move_anim.stop()
         self._move_anim.setDuration(dur)
         self._move_anim.setStartValue(cur_x)
@@ -95,16 +99,17 @@ class WanderManager(QObject):
     def _on_walk_done(self):
         if not self._walking: return
         self._walking = False
+        print("[wander] 散步完成，回到 idle")
         self._controller.play_idle()
         self._schedule_walk()
 
     def _abort_walk(self, reason):
         self._move_anim.stop()
         self._walking = False
+        print(f"[wander] 散步被打断（{reason}）")
         self._controller.play_idle()
         self._schedule_walk()
 
-    # ========== 随机朝向 ==========
     def _schedule_face(self):
         lo = float(self._config.get("behavior.facing.turn_min_s", 8))
         hi = float(self._config.get("behavior.facing.turn_max_s", 20))
@@ -114,30 +119,19 @@ class WanderManager(QObject):
         self._schedule_face()
         if self._walking or self._controller.current_action != "idle": return
         if random.random() < float(self._config.get("behavior.facing.turn_probability", 0.5)):
+            old = self._pet.facing
             self._pet.toggle_facing()
+            print(f"[wander] 随机翻面：{old} → {self._pet.facing}")
 
-    # ========== 新增：备用待机动画轮换 ==========
     def _schedule_alt_idle(self):
-        # 默认每 40~90 秒尝试一次切换备用待机
         self._idle_alt_timer.start(random.randint(40, 90) * 1000)
 
     def _try_play_alt_idle(self):
-        self._schedule_alt_idle()  # 先预约下一次
-
-        # 只有在主 idle 状态下才切（走路或点击时不行）
-        if self._controller.current_action != "idle" or self._walking:
-            return
-
-        # 寻找所有备用待机动作（名字是 idle_xxx，且不是主 idle）
+        self._schedule_alt_idle()
+        if self._controller.current_action != "idle" or self._walking: return
         all_actions = self._controller.available_actions()
         alt_actions = [a for a in all_actions if a.startswith("idle_") and a != "idle"]
-
-        # 【核心需求】：如果没有备用动作，直接 return 跳过，什么都不做
-        if not alt_actions:
-            return
-
-        # 如果有，随机挑一个播放一次（loop=False）
+        if not alt_actions: return
         target = random.choice(alt_actions)
         print(f"[wander] 播放备用待机动作：{target}")
-        # 播完后，controller 的 _on_finished 会自动切回主 idle
         self._controller.play(target, loop=False)

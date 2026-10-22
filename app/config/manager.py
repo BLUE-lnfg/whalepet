@@ -26,10 +26,8 @@ class ConfigManager(QObject):
 
     def _migrate(self):
         old = int(self._data.get("schema", 0))
-        if old == CURRENT_SCHEMA:
-            return
-        if old < 1:
-            self._data.pop("chatter", None)
+        if old == CURRENT_SCHEMA: return
+        if old < 1: self._data.pop("chatter", None)
         self._data["schema"] = CURRENT_SCHEMA
         self.save()
 
@@ -37,14 +35,12 @@ class ConfigManager(QObject):
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception: pass
 
     def get(self, key: str, default=None):
         node = self._data
         for part in key.split("."):
-            if not isinstance(node, dict) or part not in node:
-                return default
+            if not isinstance(node, dict) or part not in node: return default
             node = node[part]
         return node
 
@@ -52,8 +48,7 @@ class ConfigManager(QObject):
         parts = key.split(".")
         node = self._data
         for part in parts[:-1]:
-            if not isinstance(node.get(part), dict):
-                node[part] = {}
+            if not isinstance(node.get(part), dict): node[part] = {}
             node = node[part]
         old = node.get(parts[-1])
         node[parts[-1]] = value

@@ -30,8 +30,6 @@ class VoiceBehavior(QObject):
 
         self._pet.clicked.connect(self._on_clicked)
         self._pet.drag_started.connect(self._on_user_interact)
-
-        # 订阅角色切换，清理旧状态并重新开始
         self._pm.profile_changed.connect(self._on_profile_switched)
 
         self._binder = ConfigBinder(config, self)
@@ -50,18 +48,22 @@ class VoiceBehavior(QObject):
         self._reset_no_inter()
 
     def _on_idle_cfg(self, key):
+        print(f"[voice] {key} 变化，重新调度闲置语音")
         if self._config.get("voice.enabled", True):
             self._schedule_idle()
         else:
             self._idle_timer.stop()
 
     def _on_no_inter_cfg(self, key):
+        print("[voice] 无交互阈值变化，重新调度")
         self._reset_no_inter()
 
     def _on_late_cfg(self, key):
         self._check_late()
 
     def start(self):
+        print(
+            f"[voice] 启动完成，语言={self._config.get('voice.language', 'zh-CN')}，语音开关={self._config.get('voice.enabled', True)}")
         self._schedule_idle()
         self._reset_no_inter()
         self._clock_timer.start()
@@ -80,12 +82,16 @@ class VoiceBehavior(QObject):
         self._reset_no_inter()
 
     def _on_clicked(self):
+        print("[voice] 收到点击信号")
         self._on_user_interact()
         if not self._config.get("voice.click_enabled", True): return
         lang = str(self._config.get("voice.language", "zh-CN"))
         click_dir = self._voice_root() / lang / "click"
         files = list(click_dir.glob("*.wav")) if click_dir.exists() else list((self._voice_root() / lang).glob("*.wav"))
-        if files: self._voice.play(random.choice(files), interrupt=True)
+        if files:
+            target = random.choice(files)
+            print(f"[voice] 播放点击语音：{target.name}")
+            self._voice.play(target, interrupt=True)
 
     def _play_idle(self):
         self._schedule_idle()
@@ -93,13 +99,19 @@ class VoiceBehavior(QObject):
                                 True) or self._pet.is_dragging or self._ctrl.current_action != "idle": return
         lang = str(self._config.get("voice.language", "zh-CN"))
         files = list((self._voice_root() / lang).glob("*.wav"))
-        if files: self._voice.play(random.choice(files))
+        if files:
+            target = random.choice(files)
+            print(f"[voice] 播放闲置语音：{target.name}")
+            self._voice.play(target)
 
     def _play_no_inter(self):
         if self._pet.is_dragging: return
         lang = str(self._config.get("voice.language", "zh-CN"))
         files = list((self._voice_root() / lang / "special" / "no_interaction").glob("*.wav"))
-        if files: self._voice.play(random.choice(files))
+        if files:
+            target = random.choice(files)
+            print(f"[voice] 播放无交互语音：{target.name}")
+            self._voice.play(target)
 
     def _check_late(self):
         if not self._config.get("voice.enabled", True) or not self._config.get("voice.late_night_enabled", True): return
@@ -115,10 +127,13 @@ class VoiceBehavior(QObject):
         lang = str(self._config.get("voice.language", "zh-CN"))
         files = list((self._voice_root() / lang / "special" / "late_night").glob("*.wav"))
         if files:
+            target = random.choice(files)
+            print(f"[voice] 播放熬夜语音：{target.name}")
             self._last_date = today
             self._config.set("voice.last_late_night_date", today)
-            self._voice.play(random.choice(files))
+            self._voice.play(target)
 
+    # 测试面板接口
     def debug_info(self):
         return {"enabled": self._config.get("voice.enabled", True),
                 "language": self._config.get("voice.language", "zh-CN"), "click_enabled": True,
